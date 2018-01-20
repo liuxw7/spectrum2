@@ -213,6 +213,9 @@ static bool storeUserOAuthToken(const std::string user, const std::string OAuthT
 		LOG4CXX_ERROR(logger, "Didn't find entry for " << user << " in the database!");
 		return false;
 	}
+    std::string token = "";
+    int type = TYPE_STRING;
+    storagebackend->getUserSetting((long)info.id, OAUTH_TOKEN, type, token);
 	storagebackend->updateUserSetting((long)info.id, OAUTH_TOKEN, OAuthToken);
 	return true;
 }
@@ -458,9 +461,6 @@ class SpectrumNetworkPlugin : public NetworkPlugin {
 				purple_account_disconnect_wrapped(account);
 				purple_account_set_enabled_wrapped(account, "spectrum", FALSE);
 
-				m_accounts.erase(account);
-
-				purple_accounts_delete_wrapped(account);
 #ifndef WIN32
 #if !defined(__FreeBSD__) && !defined(__APPLE__)
 				malloc_trim(0);
@@ -1499,11 +1499,17 @@ static void connection_report_disconnect(PurpleConnection *gc, PurpleConnectionE
 // 	purple_timeout_add_seconds_wrapped(10, disconnectMe, d);
 }
 
+static void connection_disconnected(PurpleConnection *gc) {
+	PurpleAccount *account = purple_connection_get_account_wrapped(gc);
+	purple_accounts_delete_wrapped(account);
+	np->m_accounts.erase(account);
+}
+
 static PurpleConnectionUiOps conn_ui_ops =
 {
 	NULL,
 	NULL,
-	NULL,//connection_disconnected,
+	connection_disconnected,
 	NULL,
 	NULL,
 	NULL,
@@ -1972,6 +1978,72 @@ static PurpleRoomlistUiOps roomlist_ui_ops =
 	NULL
 };
 
+#if PURPLE_MAJOR_VERSION >=2 && PURPLE_MINOR_VERSION >=11
+
+static void preferencesIntChanged(PurpleAccount *account, const char *name, int value) {
+	boost::mutex::scoped_lock lock(dblock);
+        UserInfo info;
+	std::string user = np->m_accounts[account];
+	LOG4CXX_INFO(logger, "asking for " << user << " settings");
+        if(storagebackend->getUser(user, info) == false) {
+                LOG4CXX_ERROR(logger, "Didn't find entry for " << user << " in the database!");
+                return;
+        }
+        LOG4CXX_INFO(logger, "storing " << value << "as " << name << " for " << user);
+        std::string defaultValue = "0";
+        int type = TYPE_INT;
+        storagebackend->getUserSetting((long)info.id, std::string(name), type, defaultValue);
+        storagebackend->updateUserSetting((long)info.id, std::string(name), stringOf(value));
+};
+
+static void preferencesStringChanged(PurpleAccount *account, const char *name, const char *value) {
+	boost::mutex::scoped_lock lock(dblock);
+        UserInfo info;
+	std::string user = np->m_accounts[account];
+	LOG4CXX_INFO(logger, "asking for " << user << " settings");
+        if(storagebackend->getUser(user, info) == false) {
+                LOG4CXX_ERROR(logger, "Didn't find entry for " << user << " in the database!");
+                return;
+        }
+	LOG4CXX_INFO(logger, "storing " << value << "as " << name << " for " << user);
+	std::string defaultValue = "";
+	int type = TYPE_STRING;
+	storagebackend->getUserSetting((long)info.id, std::string(name), type, defaultValue);
+        storagebackend->updateUserSetting((long)info.id, std::string(name), std::string(value));
+};
+
+static void preferencesBoolChanged(PurpleAccount *account, const char *name, gboolean value) {
+	boost::mutex::scoped_lock lock(dblock);
+        UserInfo info;
+	std::string user = np->m_accounts[account];
+	LOG4CXX_INFO(logger, "asking for " << user << " settings");
+        if(storagebackend->getUser(user, info) == false) {
+                LOG4CXX_ERROR(logger, "Didn't find entry for " << user << " in the database!");
+                return;
+        }
+        LOG4CXX_INFO(logger, "storing " << value << "as " << name << " for " << user);
+        std::string defaultValue = "false";
+        int type = TYPE_BOOLEAN;
+        storagebackend->getUserSetting((long)info.id, std::string(name), type, defaultValue);
+        storagebackend->updateUserSetting((long)info.id, std::string(name), stringOf(value));
+};
+
+static PurpleAccountPrefsUiOps account_prefs_ui_ops =
+{
+	preferencesIntChanged,
+	preferencesStringChanged,
+	preferencesBoolChanged,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
+#endif
+
 static void transport_core_ui_init(void)
 {
 	purple_blist_set_ui_ops_wrapped(&blistUiOps);
@@ -1982,7 +2054,9 @@ static void transport_core_ui_init(void)
 	purple_connections_set_ui_ops_wrapped(&conn_ui_ops);
 	purple_conversations_set_ui_ops_wrapped(&conversation_ui_ops);
 	purple_roomlist_set_ui_ops_wrapped(&roomlist_ui_ops);
-
+#if PURPLE_MAJOR_VERSION >=2 && PURPLE_MINOR_VERSION >= 11
+	purple_account_prefs_set_ui_ops_wrapped(&account_prefs_ui_ops);
+#endif
 // #ifndef WIN32
 // 	purple_dnsquery_set_ui_ops_wrapped(getDNSUiOps());
 // #endif
@@ -2314,11 +2388,11 @@ int main(int argc, char **argv) {
 	config = SWIFTEN_SHRPTR_NAMESPACE::shared_ptr<Config>(cfg);
 
 	Logging::initBackendLogging(config.get());
-	if (CONFIG_STRING(config, "service.protocol") == "prpl-hangouts") {
+	if (CONFIG_STRING(config, "service.protocol") == "prpl-hangouts" || CONFIG_STRING(config, "service.protocol") == "prpl-skypeweb") {
 		storagebackend = StorageBackend::createBackend(config.get(), error);
 		if (storagebackend == NULL) {
 			LOG4CXX_ERROR(logger, "Error creating StorageBackend! " << error);
-			LOG4CXX_ERROR(logger, "Hangouts backend needs storage backend configured to work! " << error);
+			LOG4CXX_ERROR(logger, "Hangouts and Skypeweb backends needs storage backend configured to work! " << error);
 			return NetworkPlugin::StorageBackendNeeded;
 		}
 		else if (!storagebackend->connect()) {
